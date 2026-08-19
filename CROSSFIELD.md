@@ -66,23 +66,32 @@ Field arithmetic comes from [field-benches](https://github.com/osdnk/field-bench
 keccak, `--message-len 65536`, 289179 words, `l = 18`, Tiger Lake i7-11850H, median of 5.
 PCS excluded on both sides: commitment, BaseFold / trace shipping, and the explicit F162 opening.
 
-| prover | before | after |
-|---|---|---|
-| BitAnd check | 34.9 | 31.3 |
-| shift reduction | 79.1 | 79.1 |
-| ring-switch / **cross-field switch** | **4.34** | **11.24** |
-| pipeline excluding PCS | 120.5 | 123.5 |
-| (untimed) commitment | 13.2 | 13.0 |
-| (untimed) BaseFold / ship trace | 4.31 | 5.48 |
+| prover (ms) | before, excl. PCS | after, excl. PCS | before, full (stock) |
+|---|---|---|---|
+| BitAnd check | 34.9 | 31.3 | 34.9 |
+| shift reduction | 79.1 | 79.1 | 79.1 |
+| ring-switch / **cross-field switch** | **4.34** | **11.24** | 4.34 |
+| commitment | — | — | 13.2 |
+| BaseFold opening | — | — | 4.31 |
+| **total** | **120.5** | **123.5** | **138.0** |
+
+Untimed in the two excl.-PCS columns: commitment 13.2 / 13.0, and BaseFold 4.31 / shipping the
+trace 5.48.
 
 The switch breaks down as: partial evaluations 2.19 (binius64's own routine), eq table 0.94,
 transparent poly A 6.28, sumcheck 1.29, lift 0.54.
 
-| verifier | before | after |
+| verifier (ms) | before, excl. PCS | after, excl. PCS | before, full (stock) |
+|---|---|---|---|
+| total | 1.68 | 2.02 | 1.68 |
+| of which the switch | — | 0.34 | — |
+| BaseFold opening check | — | — | 0.004 |
+| *(untimed)* explicit F162 opening | — | 9.98 | — |
+
+| proof bytes | before, full (stock) | after (placeholder PCS) |
 |---|---|---|
-| total excluding PCS | 1.68 | 2.02 |
-| of which the switch | — | 0.34 |
-| (untimed) explicit F162 opening | — | 9.98 |
+| total | 249 680 | 4 203 520 |
+| of which the switch / ring-switch LIOP | 2 048 | 3 200 |
 
 LIOP bytes: ring-switching sends 128 B128 = 2048 B. The switch sends the same 128 values plus 18
 sumcheck rounds, 3200 B as encoded here (2 B128 per F162), 2804 B with tight 162-bit packing.
