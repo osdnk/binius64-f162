@@ -33,6 +33,7 @@ mod error;
 pub mod fold_word;
 pub mod protocols;
 mod prove;
+pub mod crossfield;
 pub mod ring_switch;
 pub mod zk_config;
 

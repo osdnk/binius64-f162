@@ -328,17 +328,9 @@ impl IOPProver {
 		)
 		.entered();
 
-		// Ring-switching reduction of the witness claim, at the point above less its segment
-		// selector — the verifier consumes that when reconstructing the full witness evaluation.
-		let ring_switch::RingSwitchOutput {
-			rs_eq_ind,
-			sumcheck_claim,
-		} = ring_switch::prove(alloc, witness_packed.to_ref(), witness_point, &mut *channel);
-
-		// Prove oracle relations via channel (runs BaseFold internally). The intmul pushforward
-		// relation, when the IntMul reduction ran, was already queued inside phase 5.
-		channel.prove_oracle_relation(trace_oracle.clone(), rs_eq_ind, sumcheck_claim);
-		channel.finalize_oracle(trace_oracle, witness_packed);
+		// Cross-field switch: reduce the B128 witness claim to an F(2^162) evaluation claim.
+		let _ = &trace_oracle;
+		crate::crossfield::prove(witness_packed.to_ref(), witness_point, &mut *channel);
 
 		drop(pcs_guard);
 

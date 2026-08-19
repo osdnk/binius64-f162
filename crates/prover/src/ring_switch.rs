@@ -257,7 +257,7 @@ where
 ///
 /// The `2^n` tensor itself is never materialized: both consumers read the factors directly.
 /// The low factor spans one row fold chunk, or the whole point when that is shorter.
-fn expand_tensor_factors(point: &[B128]) -> (FieldBuffer<B128>, FieldBuffer<B128>) {
+pub fn expand_tensor_factors(point: &[B128]) -> (FieldBuffer<B128>, FieldBuffer<B128>) {
 	let (point_lo, point_hi) = point.split_at(point.len().min(LOG_SPLIT_BLOCK));
 	(eq_ind_partial_eval::<B128>(point_lo), eq_ind_partial_eval::<B128>(point_hi))
 }

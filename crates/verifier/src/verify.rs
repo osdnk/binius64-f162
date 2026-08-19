@@ -216,6 +216,74 @@ impl IOPVerifier {
 
 		Ok(reduction.wiring)
 	}
+
+	pub fn verify_crossfield<Channel>(
+		&self,
+		inout: &[Channel::Word],
+		channel: &mut Channel,
+	) -> Result<WiringEvalClaim<'_, Channel::Elem>, Error>
+	where
+		Channel: IOPVerifierChannel<B128> + WordIPVerifierChannel<B128>,
+		Channel: binius_ip::channel::IPVerifierChannel<B128, Elem = B128>,
+		Channel::Elem: FieldOps<Scalar = B128> + From<B128>,
+	{
+		// The caller passes only the inout values. The constants are already part of the
+		// constraint system, so restating them would be redundant — and a caller that restated
+		// them wrongly would be describing a different system.
+		if inout.len() != self.constraint_system.n_inout {
+			return Err(Error::IncorrectPublicInputLength {
+				expected: self.constraint_system.n_inout,
+				actual: inout.len(),
+			});
+		}
+
+		// The shift reduction reads the whole public segment, which is the constants followed by
+		// the inout values — the order the value vector places them in. The constants are fixed by
+		// the constraint system, so they lift into the channel's word type as themselves.
+		let public = self
+			.constraint_system
+			.constants
+			.iter()
+			.map(|&word| Channel::Word::from(word))
+			.chain(inout.iter().cloned())
+			.collect::<Vec<_>>();
+
+		let _verify_guard =
+			tracing::info_span!("Verify", operation = "verify", perfetto_category = "operation")
+				.entered();
+
+		// Receive the trace oracle commitment via channel. The trace is the witness, so it is
+		// witness-dependent (masked in a ZK proof).
+		let trace_oracle = channel.recv_oracle(self.log_witness_elems(), true)?;
+
+		// Reduce every constraint to one claim on the committed trace.
+		let reduction = reduce_constraints(
+			self.constraint_system(),
+			Instances::Single,
+			InoutSegment::Public,
+			&public,
+			channel,
+		)?;
+
+		// [phase] Ring-Switching + Verify PCS Opening
+		let pcs_guard = tracing::info_span!(
+			"[phase] Verify PCS Opening",
+			phase = "verify_pcs_opening",
+			perfetto_category = "phase"
+		)
+		.entered();
+
+		// Cross-field switch: B128 witness claim -> F(2^162) evaluation claim, opened by a
+		// PCS over F(2^162). The verifier checks that opening explicitly.
+		let eval_point = reduction.trace_point();
+		let _ = &trace_oracle;
+		crate::crossfield::verify(*reduction.shift.witness_eval(), &eval_point, channel)
+			.expect("cross-field switch");
+
+		drop(pcs_guard);
+
+		Ok(reduction.wiring)
+	}
 }
 
 /// Struct for verifying instances of a particular constraint system.
@@ -336,7 +404,7 @@ where
 			.create_channel_from_transcript::<H, Challenger_, _>(transcript);
 		let inout = channel.observe_words(inout);
 		self.iop_verifier
-			.verify(&inout, &mut channel)?
+			.verify_crossfield(&inout, &mut channel)?
 			.check_native()?;
 		channel.finish()?;
 		Ok(())

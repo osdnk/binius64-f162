@@ -23,6 +23,7 @@ inherits = "release"
 debug = true
 
 [workspace.dependencies]
+bin-fields = { git = "https://github.com/osdnk/field-benches" }
 anyhow = "1.0.98"
 array-util = "1.0.2"
 assert_matches = "1.5.0"
