@@ -1,0 +1,206 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+  merge_group:
+  # Cache warming only — main is already gated by the merge queue, so nothing here re-checks it.
+  #
+  # Actions restores a cache from the current ref, the base branch, and the default branch, but
+  # neither of the triggers above writes to main's scope: pull requests save to `refs/pull/<N>/merge`
+  # and merge-queue runs save to a `gh-readonly-queue` branch that is deleted immediately. With
+  # nothing on main to fall back to, every run compiles the workspace from scratch. A push run
+  # writes the entry both of them then restore.
+  #
+  # Only `rust-checks` participates, and only far enough to populate its cache; see the `if`
+  # conditions below.
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  # CI never debugs interactively, so drop most debuginfo to cut compile + link time. Keep line
+  # tables so panic / test-failure backtraces still report file:line.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
+concurrency:
+  group: ${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  format:
+    name: format
+    if: github.event_name != 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install prek
+        run: cargo install prek --version 0.4.4 --locked
+      - name: Check copyright
+        run: prek run copyright --all-files
+      - name: Check typos
+        run: prek run typos --all-files
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+      - name: Install nightly toolchain for rustfmt
+        run: rustup toolchain install nightly-2026-07-01 --component rustfmt
+      - name: Check rustfmt
+        run: prek run rustfmt --all-files
+
+  rust-checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          # binius-circuits tests are architecture-independent (the crate depends only on
+          # binius-frontend + binius-core, which contain no arch-specific code), so they run only on
+          # the x86_64 leg. The other legs skip them with nextest's run-layer filter (`-E`) rather
+          # than `cargo --exclude`: keeping the build set at `--workspace` matches the Compile step's
+          # feature unification, so the dependency tree is not recompiled. See BINIUS-151.
+          - name: x86_64-portable
+            runner: ubuntu-24.04
+            rustflags: # portable
+            test_args: "-E 'not package(binius-circuits)'"
+          - name: x86_64
+            runner: ubuntu-24.04
+            rustflags: "-Ctarget-cpu=native"
+            test_args: ""
+          - name: arm64
+            runner: ubuntu-24.04-arm
+            rustflags: "-Ctarget-cpu=native"
+            test_args: "-E 'not package(binius-circuits)'"
+    name: rust-checks-${{ matrix.arch.name }}
+    # This job also runs on pushes to main, where it stops after Compile and exists only to write a
+    # cache entry that pull-request and merge-queue runs can restore. The verification steps below
+    # are skipped there, since the merge queue already ran them on the same tree.
+    #
+    # The warming runs live inside this job rather than in a workflow of their own so that the cache
+    # keys match by construction. `Swatinem/rust-cache` derives the key from, among other things, the
+    # literal job id and every `CARGO*`/`RUST*` environment variable, so a separate workflow would
+    # have to restate the job id, the per-leg RUSTFLAGS and the workflow-level CARGO_* settings — and
+    # would silently stop matching the moment one of them is edited here.
+    runs-on: ${{ matrix.arch.runner }}
+    env:
+      # Link with lld instead of the default ld.bfd: the rust-checks build links many test and
+      # example binaries, where bfd is a serial bottleneck. Appended to the per-arch flags
+      # (target-cpu). lld is installed below.
+      RUSTFLAGS: "${{ matrix.arch.rustflags }} -Clink-arg=-fuse-ld=lld"
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          components: clippy
+      - name: Install cargo-nextest
+        if: github.event_name != 'push'
+        uses: taiki-e/install-action@v2.85.13
+        with:
+          tool: cargo-nextest
+      - name: Install lld
+        run: sudo apt-get update -qq && sudo apt-get install -y lld
+      # Don't *build* benchmarks: each criterion bench is a separate binary linking the whole crate,
+      # and CI never runs them (`cargo bench`), so codegen + linking them is pure overhead. Clippy
+      # below still checks them via `--all-targets` — that's front-end only (no codegen/link), so it
+      # guards against bench bitrot (API drift) for a fraction of a full build.
+      - name: Compile
+        run: cargo build --workspace --lib --bins --tests --examples
+      - name: Run platform diagnostics
+        if: github.event_name != 'push'
+        run: cargo test -p binius-utils --features platform-diagnostics test_platform_diagnostics -- --nocapture
+      # `--all-features` so that feature-gated code (rayon, perfetto, trace_multiplications, …) is
+      # linted too. Every optional feature in the workspace is off by default, so without this the
+      # gated code is never compiled and bitrots silently. The cost is that clippy cannot reuse the
+      # Compile step's artifacts, since the feature unification differs.
+      - name: Run clippy
+        if: github.event_name != 'push'
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Run tests
+        if: github.event_name != 'push'
+        run: cargo nextest run --workspace --no-fail-fast ${{ matrix.arch.test_args }}
+      # Must run doctests separately, see https://github.com/nextest-rs/nextest/issues/16
+      - name: Run doctests
+        if: github.event_name != 'push'
+        run: cargo test --doc --workspace
+
+  # Build against wasm32-unknown-unknown target to test that our libraries compile to wasm.
+  wasm-vanilla-build:
+    name: wasm-vanilla-build
+    if: github.event_name != 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          target: wasm32-unknown-unknown
+      - name: Compile vanilla wasm32
+        run: cargo build -p binius-field --target wasm32-unknown-unknown
+
+  wasm-tests:
+    name: wasm-tests
+    if: github.event_name != 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          target: wasm32-wasip1
+      - name: Set up Wasmer
+        uses: wasmerio/setup-wasmer@v3
+        with:
+          version: 'v6.0.1'
+      - name: Test on wasm32-wasip1
+        run: cargo test -p binius-math -p binius-field -p binius-prover -p binius-verifier --target wasm32-wasip1 --config "target.wasm32-wasip1.runner=['wasmer']"
+
+  rust-doc:
+    name: rust-doc
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
+      - name: Build documentation (including private items for CI checks)
+        run: cargo doc --document-private-items --no-deps
+        env:
+          # Promote rustdoc lints (broken intra-doc links, missing crate-level
+          # docs) to errors, matching the `rustdoc` pre-push hook in prek.toml.
+          RUSTDOCFLAGS: "-D warnings"
+
+  circuits-snapshot:
+    name: circuits-snapshot
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
+      # One job instead of a 9-way matrix: the examples share the same `binius-examples` crate, so
+      # a matrix recompiled that whole tree (which links the prover + verifier) nine times for a
+      # stats-only check. Building once and running each snapshot in turn keeps the work but cuts
+      # ~8 redundant compiles. See BINIUS-151.
+      - name: Check circuit statistics snapshots
+        run: |
+          set -e
+          # Keep this list in sync with the committed snapshots in crates/examples/snapshots:
+          # every example that ships a .snap must be checked here, or it can drift undetected.
+          for example in ethsign zklogin sha256 sha512 keccak blake2s blake2b blake3_compress blake3 hashsign ec_msm bitcoin_header_chain bitcoin_p2pkh; do
+            echo "::group::${example}"
+            cargo run --example "${example}" -- check-snapshot
+            echo "::endgroup::"
+          done
