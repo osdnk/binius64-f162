@@ -63,8 +63,15 @@ Field arithmetic comes from [field-benches](https://github.com/osdnk/field-bench
 
 ## Numbers
 
-keccak, `--message-len 65536`, 289179 words, `l = 18`, Tiger Lake i7-11850H, median of 5.
-PCS excluded on both sides: commitment, BaseFold / trace shipping, and the explicit F162 opening.
+Tiger Lake i7-11850H. PCS excluded on both sides: commitment, BaseFold / trace shipping, and
+the explicit F162 opening.
+
+| keccak instance | words | committed elems | l | committed trace |
+|---|---|---|---|---|
+| `--message-len 65536` | 289 179 | 2^18 | 18 | 4 MiB |
+| `--message-len 262144` | 1 156 779 | 2^20 | 20 | 16 MiB |
+
+### 65536 bytes, median of 5
 
 | prover (ms) | before, excl. PCS | after, excl. PCS | before, full (stock) |
 |---|---|---|---|
@@ -95,6 +102,35 @@ transparent poly A 6.28, sumcheck 1.29, lift 0.54.
 
 LIOP bytes: ring-switching sends 128 B128 = 2048 B. The switch sends the same 128 values plus 18
 sumcheck rounds, 3200 B as encoded here (2 B128 per F162), 2804 B with tight 162-bit packing.
+
+### 262144 bytes (4x), median of 3
+
+| prover (ms) | before, excl. PCS | after, excl. PCS | before, full (stock) |
+|---|---|---|---|
+| BitAnd check | 140.0 | 125.0 | 140.0 |
+| shift reduction | 310.0 | 313.0 | 310.0 |
+| ring-switch / **cross-field switch** | **17.4** | **46.6** | 17.4 |
+| commitment | — | — | 55.7 |
+| BaseFold opening | — | — | 17.3 |
+| **total** | **479.0** | **496.8** | **552.0** |
+
+Switch: lift 2.09, partial evaluations 8.80, eq table 3.78, transparent poly A 25.5, sumcheck 6.27.
+
+| verifier (ms) | before, excl. PCS | after, excl. PCS | before, full (stock) |
+|---|---|---|---|
+| total | 6.38 | 6.60 | 6.38 |
+| of which the switch | — | 0.38 | — |
+| *(untimed)* explicit F162 opening | — | 40.7 | — |
+
+| proof bytes | before, full (stock) | after (placeholder PCS) |
+|---|---|---|
+| total | 317 552 | 16 786 752 |
+| switch / ring-switch LIOP only | 2 048 | 3 328 |
+
+Scaling from `l = 18` to `l = 20`: the switch prover goes 11.24 -> 46.6 ms (4.15x for 4x the
+trace, linear, and a steady ~2.6x ring-switching at both sizes), while the switch *verifier* goes
+0.34 -> 0.38 ms — it grows with `l`, not `2^l`, which is the point of evaluating the transparent
+coefficient by the transfer-matrix fold.
 
 ## Headroom
 
